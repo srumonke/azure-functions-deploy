@@ -1,0 +1,64 @@
+template:
+  name: Azure Function Shell Deploy
+  identifier: azure_function_shell_deploy
+  versionLabel: v1
+  type: CustomDeployment
+  projectIdentifier: customer
+  orgIdentifier: default
+  description: Deploys an Azure Function via Azure CLI on the delegate. No container runtime, no Kubernetes cluster required.
+  tags:
+    azure: ""
+    demo: ""
+  spec:
+    infrastructure:
+      variables:
+        - name: resourceGroup
+          type: String
+          value: <+input>
+          description: Azure resource group that contains the Function App
+        - name: subscriptionId
+          type: String
+          value: <+input>
+          description: Azure subscription ID
+        - name: region
+          type: String
+          value: westeurope
+          description: Azure region
+      fetchInstancesScript:
+        store:
+          type: Inline
+          spec:
+            content: |-
+              #!/usr/bin/env bash
+              # Harness runs this to discover deployed instances.
+              # A Function App's "instances" are its deployment slots.
+              # Self-contained demo: emitted statically instead of calling
+              #   az functionapp deployment slot list
+              set -euo pipefail
+
+              RG="<+infra.variables.resourceGroup>"
+              APP="<+serviceVariables.functionApp>"
+
+              cat > "$INSTANCE_OUTPUT_PATH" <<EOF
+              {
+                "instances": [
+                  { "instancename": "${APP}-staging",    "slot": "staging",    "resourceGroup": "${RG}" },
+                  { "instancename": "${APP}-production", "slot": "production", "resourceGroup": "${RG}" }
+                ]
+              }
+              EOF
+
+              echo "Published 2 slot instances for ${APP} in ${RG}"
+      instanceAttributes:
+        - name: instancename
+          jsonPath: instancename
+          description: Function App slot instance name
+        - name: slot
+          jsonPath: slot
+          description: Deployment slot
+        - name: resourceGroup
+          jsonPath: resourceGroup
+          description: Azure resource group
+      instancesListPath: instances
+    execution:
+      stepTemplateRefs: []

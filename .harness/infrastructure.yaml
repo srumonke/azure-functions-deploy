@@ -1,0 +1,29 @@
+infrastructureDefinition:
+  name: Azure Function Test
+  identifier: azure_function_test
+  orgIdentifier: default
+  projectIdentifier: customer
+  environmentRef: test
+  deploymentType: CustomDeployment
+  type: CustomDeployment
+  spec:
+    customDeploymentRef:
+      templateRef: azure_function_shell_deploy
+      versionLabel: v1
+    variables:
+      - name: resourceGroup
+        type: String
+        value: rg-customer-functions-test
+      - name: subscriptionId
+        type: String
+        value: 00000000-0000-0000-0000-000000000000
+      - name: region
+        type: String
+        value: westeurope
+  allowSimultaneousDeployments: false
+
+# To add a production site, copy this block and change:
+#   identifier      -> azure_function_prod
+#   environmentRef  -> production
+#   resourceGroup   -> rg-customer-functions-prod
+# Everything else (template, service, pipeline) is reused unchanged.

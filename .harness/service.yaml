@@ -1,0 +1,37 @@
+service:
+  name: Azure Function Demo
+  identifier: azure_function_demo
+  orgIdentifier: default
+  projectIdentifier: customer
+  description: Azure Function deployed via Azure CLI shell steps - no container runtime required
+  serviceDefinition:
+    type: CustomDeployment
+    spec:
+      customDeploymentRef:
+        templateRef: azure_function_shell_deploy
+        versionLabel: v1
+      variables:
+        - name: functionApp
+          type: String
+          value: customer-cc-func-demo
+          description: Name of the Azure Function App
+        - name: stagingSlot
+          type: String
+          value: staging
+          description: Slot deployed to before the swap
+        - name: deployType
+          type: String
+          value: ZIP
+          description: ZIP or CONTAINER
+        - name: artifactUrl
+          type: String
+          value: https://artifacts.example.com/customer/cc-func-1.0.0.zip
+          description: Function package to deploy (ZIP mode)
+        - name: containerImage
+          type: String
+          value: customeracr.azurecr.io/cc-func:1.0.0
+          description: Function container image (CONTAINER mode)
+        - name: healthPath
+          type: String
+          value: /api/health
+          description: Endpoint probed after the swap

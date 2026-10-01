@@ -1,0 +1,349 @@
+pipeline:
+  name: Azure Function Shell Demo
+  identifier: azure_function_shell_demo
+  projectIdentifier: customer
+  orgIdentifier: default
+  description: Deploys an Azure Function with Azure CLI shell steps on the delegate. No containerized step group, no Kubernetes cluster.
+  tags:
+    azure: ""
+    demo: ""
+  variables:
+    - name: azureClientId
+      type: String
+      description: Service principal app ID
+      required: false
+      value: 11111111-2222-3333-4444-555555555555
+    - name: azureTenantId
+      type: String
+      description: Azure AD tenant ID
+      required: false
+      value: 99999999-8888-7777-6666-555555555555
+  stages:
+    - stage:
+        name: Deploy Azure Function
+        identifier: deploy_azure_function
+        type: Deployment
+        spec:
+          deploymentType: CustomDeployment
+          customDeploymentRef:
+            templateRef: azure_function_shell_deploy
+            versionLabel: v1
+          service:
+            serviceRef: azure_function_demo
+          environment:
+            environmentRef: test
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: azure_function_test
+          execution:
+            steps:
+              - step:
+                  name: Show Execution Context
+                  identifier: show_execution_context
+                  type: ShellScript
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          set -euo pipefail
+
+                          echo "=============================================="
+                          echo " Where is this running?"
+                          echo "=============================================="
+                          echo "Host          : $(hostname)"
+                          echo "User          : $(whoami)"
+                          echo "Kernel        : $(uname -sr)"
+                          echo ""
+                          echo "This is the Harness delegate process itself."
+                          echo "No pod was created. No Kubernetes connector is"
+                          echo "configured anywhere in this pipeline."
+                          echo ""
+                          echo "=============================================="
+                          echo " Resolved CD context"
+                          echo "=============================================="
+                          echo "Service       : <+service.name>"
+                          echo "Environment   : <+env.name> (<+env.type>)"
+                          echo "Function App  : <+serviceVariables.functionApp>"
+                          echo "Resource Group: <+infra.variables.resourceGroup>"
+                          echo "Region        : <+infra.variables.region>"
+                          echo "Staging Slot  : <+serviceVariables.stagingSlot>"
+                          echo "Deploy Mode   : <+serviceVariables.deployType>"
+                          echo ""
+                          if command -v az >/dev/null 2>&1; then
+                            echo "az CLI        : $(az version --query '\"azure-cli\"' -o tsv 2>/dev/null || echo present)"
+                            echo "MODE          : LIVE"
+                          else
+                            echo "az CLI        : not installed"
+                            echo "MODE          : SIMULATED (commands printed, not executed)"
+                          fi
+                    environmentVariables: []
+                    outputVariables: []
+              - step:
+                  name: Fetch Instances
+                  identifier: fetch_instances
+                  type: FetchInstanceScript
+                  timeout: 10m
+                  spec: {}
+              - step:
+                  name: Deploy To Staging Slot
+                  identifier: deploy_to_staging_slot
+                  type: ShellScript
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          set -euo pipefail
+
+                          APP="<+serviceVariables.functionApp>"
+                          RG="<+infra.variables.resourceGroup>"
+                          SUB="<+infra.variables.subscriptionId>"
+                          SLOT="<+serviceVariables.stagingSlot>"
+                          MODE="<+serviceVariables.deployType>"
+                          ZIP="<+serviceVariables.artifactUrl>"
+                          IMG="<+serviceVariables.containerImage>"
+                          CLIENT_ID="<+pipeline.variables.azureClientId>"
+                          TENANT_ID="<+pipeline.variables.azureTenantId>"
+
+                          if command -v az >/dev/null 2>&1; then SIM=0; else SIM=1; fi
+                          run() {
+                            if [ "$SIM" -eq 1 ]; then
+                              echo "  [SIMULATED] $*"
+                            else
+                              echo "  [RUN] $*"
+                              "$@"
+                            fi
+                          }
+
+                          echo "=== Deploying ${APP} to slot '${SLOT}' (mode=${MODE}) ==="
+                          if [ "$SIM" -eq 1 ]; then
+                            echo "    az CLI absent on this delegate -> dry run."
+                          fi
+
+                          # TODO: replace the literal below with
+                          #   <+secrets.getValue("azure_sp_secret")>
+                          run az login --service-principal \
+                            -u "$CLIENT_ID" \
+                            -p "REPLACE_WITH_HARNESS_SECRET" \
+                            --tenant "$TENANT_ID"
+
+                          run az account set --subscription "$SUB"
+
+                          if [ "$MODE" = "ZIP" ]; then
+                            echo "--- ZIP deploy ---"
+                            run az functionapp deployment source config-zip \
+                              -g "$RG" -n "$APP" --slot "$SLOT" --src "$ZIP"
+                          else
+                            echo "--- Container deploy ---"
+                            run az functionapp config container set \
+                              -g "$RG" -n "$APP" --slot "$SLOT" \
+                              --docker-custom-image-name "$IMG"
+                            run az functionapp restart -g "$RG" -n "$APP" --slot "$SLOT"
+                          fi
+
+                          echo ""
+                          echo "Artifact is live on the STAGING slot only."
+                          echo "Production traffic is still on the old version."
+                    environmentVariables: []
+                    outputVariables: []
+              - step:
+                  name: Health Check Staging
+                  identifier: health_check_staging
+                  type: ShellScript
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          set -euo pipefail
+
+                          APP="<+serviceVariables.functionApp>"
+                          SLOT="<+serviceVariables.stagingSlot>"
+                          PATH_="<+serviceVariables.healthPath>"
+                          URL="https://${APP}-${SLOT}.azurewebsites.net${PATH_}"
+
+                          if command -v az >/dev/null 2>&1; then SIM=0; else SIM=1; fi
+
+                          echo "=== Probing staging slot before swap ==="
+                          echo "URL: ${URL}"
+
+                          if [ "$SIM" -eq 1 ]; then
+                            echo "  [SIMULATED] curl -fsS --retry 5 --retry-delay 10 ${URL}"
+                            echo "  [SIMULATED] HTTP 200 OK"
+                            echo ""
+                            echo "Gate passed (simulated). In a live run a non-200"
+                            echo "here fails the stage BEFORE any production swap."
+                            exit 0
+                          fi
+
+                          for i in $(seq 1 10); do
+                            CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL" || echo 000)
+                            echo "  attempt ${i}: HTTP ${CODE}"
+                            if [ "$CODE" = "200" ]; then
+                              echo "Staging slot healthy."
+                              exit 0
+                            fi
+                            sleep 10
+                          done
+
+                          echo "Staging slot never returned 200 - failing before swap."
+                          exit 1
+                    environmentVariables: []
+                    outputVariables: []
+              - step:
+                  name: Swap Slot To Production
+                  identifier: swap_slot_to_production
+                  type: ShellScript
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          set -euo pipefail
+
+                          APP="<+serviceVariables.functionApp>"
+                          RG="<+infra.variables.resourceGroup>"
+                          SUB="<+infra.variables.subscriptionId>"
+                          SLOT="<+serviceVariables.stagingSlot>"
+                          CLIENT_ID="<+pipeline.variables.azureClientId>"
+                          TENANT_ID="<+pipeline.variables.azureTenantId>"
+
+                          if command -v az >/dev/null 2>&1; then SIM=0; else SIM=1; fi
+                          run() {
+                            if [ "$SIM" -eq 1 ]; then
+                              echo "  [SIMULATED] $*"
+                            else
+                              echo "  [RUN] $*"
+                              "$@"
+                            fi
+                          }
+
+                          echo "=== Swapping '${SLOT}' into production ==="
+
+                          run az login --service-principal \
+                            -u "$CLIENT_ID" \
+                            -p "REPLACE_WITH_HARNESS_SECRET" \
+                            --tenant "$TENANT_ID"
+
+                          run az account set --subscription "$SUB"
+
+                          run az functionapp deployment slot swap \
+                            -g "$RG" -n "$APP" \
+                            --slot "$SLOT" --target-slot production
+
+                          echo ""
+                          echo "Swap complete - this is the zero-downtime cutover."
+                          echo "The old version now sits on '${SLOT}', which is"
+                          echo "exactly what makes rollback a second swap."
+                    environmentVariables: []
+                    outputVariables: []
+              - step:
+                  name: Verify Production
+                  identifier: verify_production
+                  type: ShellScript
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          set -euo pipefail
+
+                          APP="<+serviceVariables.functionApp>"
+                          PATH_="<+serviceVariables.healthPath>"
+                          URL="https://${APP}.azurewebsites.net${PATH_}"
+
+                          if command -v az >/dev/null 2>&1; then SIM=0; else SIM=1; fi
+
+                          echo "=== Verifying production endpoint ==="
+                          echo "URL: ${URL}"
+
+                          if [ "$SIM" -eq 1 ]; then
+                            echo "  [SIMULATED] curl -fsS ${URL} -> HTTP 200"
+                            echo ""
+                            echo "Deploy complete. Zero containers, zero clusters."
+                            exit 0
+                          fi
+
+                          CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL" || echo 000)
+                          echo "  HTTP ${CODE}"
+                          if [ "$CODE" != "200" ]; then
+                            echo "Production unhealthy after swap - triggering rollback."
+                            exit 1
+                          fi
+                          echo "Production healthy."
+                    environmentVariables: []
+                    outputVariables: []
+            rollbackSteps:
+              - step:
+                  name: Swap Back
+                  identifier: swap_back
+                  type: ShellScript
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          set -euo pipefail
+
+                          APP="<+serviceVariables.functionApp>"
+                          RG="<+infra.variables.resourceGroup>"
+                          SUB="<+infra.variables.subscriptionId>"
+                          SLOT="<+serviceVariables.stagingSlot>"
+                          CLIENT_ID="<+pipeline.variables.azureClientId>"
+                          TENANT_ID="<+pipeline.variables.azureTenantId>"
+
+                          if command -v az >/dev/null 2>&1; then SIM=0; else SIM=1; fi
+                          run() {
+                            if [ "$SIM" -eq 1 ]; then
+                              echo "  [SIMULATED] $*"
+                            else
+                              echo "  [RUN] $*"
+                              "$@"
+                            fi
+                          }
+
+                          echo "=== ROLLBACK: swapping the previous version back ==="
+
+                          run az login --service-principal \
+                            -u "$CLIENT_ID" \
+                            -p "REPLACE_WITH_HARNESS_SECRET" \
+                            --tenant "$TENANT_ID"
+
+                          run az account set --subscription "$SUB"
+
+                          run az functionapp deployment slot swap \
+                            -g "$RG" -n "$APP" \
+                            --slot production --target-slot "$SLOT"
+
+                          echo ""
+                          echo "Rolled back. The native AzureFunctionDeploy step"
+                          echo "gives you this for free; here it is one explicit"
+                          echo "step you can read and audit."
+                    environmentVariables: []
+                    outputVariables: []
+        tags: {}
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
